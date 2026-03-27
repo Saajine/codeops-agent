@@ -41,7 +41,8 @@ class Config:
     @classmethod
     def validate(cls) -> None:
         """Raise if critical config is missing (skipped in demo mode)."""
-        if cls.DEMO_MODE:
+        # Check both class-level and instance-level (config singleton) DEMO_MODE
+        if cls.DEMO_MODE or os.getenv("CODEOPS_DEMO", "").lower() in ("1", "true", "yes"):
             return
         if not cls.ANTHROPIC_API_KEY:
             raise EnvironmentError(
