@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# CodeOps runtime artifacts
+codeops_memory.db
+codeops_context.*.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# macOS
+.DS_Store
