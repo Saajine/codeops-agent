@@ -29,6 +29,7 @@ from codeops.agents.coder import CoderAgent
 from codeops.agents.github_pr import GitHubPRAgent
 from codeops.agents.planner import PlannerAgent
 from codeops.agents.reviewer import ReviewerAgent
+from codeops.agents.test_generator import TestGeneratorAgent
 from codeops.config import config
 from codeops.memory.context import ContextManager
 from codeops.memory.store import MemoryStore
@@ -277,6 +278,7 @@ class Orchestrator:
             "planner": "🗺  Planning",
             "coder": "⚙  Coding",
             "reviewer": "🔍  Reviewing",
+            "tester": "🧪  Generating Tests",
             "github_pr": "🔀  PR Automation",
             "architecture_advisor": "🏗  Architecture Review",
         }
@@ -308,6 +310,7 @@ class Orchestrator:
             ReviewerAgent(store=self.store),
             GitHubPRAgent(store=self.store),
             ArchitectureAdvisorAgent(store=self.store),
+            TestGeneratorAgent(store=self.store),
         ]
         for agent in agent_instances:
             self._agents[agent.name] = agent

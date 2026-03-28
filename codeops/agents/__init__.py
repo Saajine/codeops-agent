@@ -4,6 +4,7 @@ from .coder import CoderAgent
 from .github_pr import GitHubPRAgent
 from .planner import PlannerAgent
 from .reviewer import ReviewerAgent
+from .test_generator import TestGeneratorAgent
 
 __all__ = [
     "BaseAgent",
@@ -13,4 +14,5 @@ __all__ = [
     "ReviewerAgent",
     "GitHubPRAgent",
     "ArchitectureAdvisorAgent",
+    "TestGeneratorAgent",
 ]

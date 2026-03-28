@@ -31,8 +31,9 @@ class TestSkillDefinition:
     def test_roadmap_skills_flagged(self):
         roadmap = [s for s in ALL_SKILLS if s.config.get("roadmap")]
         names = {s.name for s in roadmap}
-        assert "test_generation" in names
         assert "doc_generation" in names
+        # test_generation is now active (no longer roadmap)
+        assert "test_generation" not in names
 
     def test_mvp_skills_not_roadmap(self):
         for skill in [SKILL_TASK_PLANNING, SKILL_CODE_GENERATION, SKILL_CODE_REVIEW]:

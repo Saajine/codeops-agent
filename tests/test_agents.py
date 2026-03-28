@@ -17,6 +17,7 @@ from codeops.agents.base_agent import AgentResult
 from codeops.agents.coder import CoderAgent
 from codeops.agents.planner import PlannerAgent
 from codeops.agents.reviewer import ReviewerAgent
+from codeops.agents.test_generator import TestGeneratorAgent
 from codeops.memory.context import ContextManager
 from codeops.memory.store import MemoryStore
 
@@ -268,3 +269,82 @@ class TestReviewerAgent:
             result = reviewer.execute("Review rate limiter", context)
 
         assert result.status == "error"
+
+
+# ── TestGeneratorAgent tests ─────────────────────────────────────────────────
+
+MOCK_TEST_OUTPUT = """\
+---FILE: tests/test_rate_limiter.py---
+\"\"\"Tests for rate limiter.\"\"\"
+import pytest
+
+class TestRateLimiter:
+    def test_basic(self):
+        assert True
+
+    def test_edge_case(self):
+        assert True
+---END---
+
+## Test Generation Summary
+```json
+{
+    "test_file": "tests/test_rate_limiter.py",
+    "test_count": 2,
+    "coverage_estimate": "85%",
+    "categories": ["basic", "edge_cases"],
+    "framework": "pytest"
+}
+```
+"""
+
+
+class TestTestGeneratorAgent:
+    def test_execute_returns_success(self, tmp_store, context):
+        context.set_agent_output("code_generation", MOCK_CODE, agent_name="coder")
+        tester = TestGeneratorAgent(store=tmp_store)
+        with patch.object(tester, "_call_llm", return_value=MOCK_TEST_OUTPUT):
+            result = tester.execute("Generate tests for rate limiter", context)
+
+        assert isinstance(result, AgentResult)
+        assert result.status == "success"
+        assert result.skill == "test_generation"
+        assert result.agent_name == "tester"
+        assert result.next_action == "done"
+
+    def test_metadata_contains_test_info(self, tmp_store, context):
+        context.set_agent_output("code_generation", MOCK_CODE, agent_name="coder")
+        tester = TestGeneratorAgent(store=tmp_store)
+        with patch.object(tester, "_call_llm", return_value=MOCK_TEST_OUTPUT):
+            result = tester.execute("Generate tests", context)
+
+        assert "test_files" in result.metadata
+        assert result.metadata["test_count"] == 2
+        assert result.metadata["coverage_estimate"] == "85%"
+
+    def test_parse_files_extracts_test_blocks(self, tmp_store, context):
+        tester = TestGeneratorAgent(store=tmp_store)
+        files = tester._parse_files(MOCK_TEST_OUTPUT)
+        assert "tests/test_rate_limiter.py" in files
+        assert "TestRateLimiter" in files["tests/test_rate_limiter.py"]
+
+    def test_parse_summary_extracts_json(self, tmp_store, context):
+        summary = TestGeneratorAgent._parse_summary(MOCK_TEST_OUTPUT)
+        assert summary["test_count"] == 2
+        assert summary["framework"] == "pytest"
+
+    def test_fallback_when_no_code_in_context(self, tmp_store, context):
+        tester = TestGeneratorAgent(store=tmp_store)
+        with patch.object(tester, "_call_llm", return_value=MOCK_TEST_OUTPUT):
+            result = tester.execute("Generate tests for this code: def add(a,b): return a+b", context)
+
+        assert result.status == "success"
+
+    def test_output_is_persisted(self, tmp_store, context):
+        context.set_agent_output("code_generation", MOCK_CODE, agent_name="coder")
+        tester = TestGeneratorAgent(store=tmp_store)
+        with patch.object(tester, "_call_llm", return_value=MOCK_TEST_OUTPUT):
+            tester.execute("Generate tests", context)
+
+        outputs = tmp_store.get_agent_outputs(context.task_id)
+        assert any(o["agent_name"] == "tester" for o in outputs)

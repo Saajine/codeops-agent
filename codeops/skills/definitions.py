@@ -68,11 +68,10 @@ SKILL_TEST_GENERATION = SkillDefinition(
     agent="tester",
     description=(
         "Generate comprehensive unit and integration tests for code changes. "
-        "[ROADMAP — not yet available]"
+        "Produces pytest test suites covering happy paths, edge cases, and concurrency."
     ),
     tags=["test", "unit", "pytest", "coverage"],
     priority=40,
-    config={"roadmap": True},
 )
 
 SKILL_DOC_GENERATION = SkillDefinition(
