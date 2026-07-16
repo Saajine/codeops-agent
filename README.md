@@ -2,9 +2,10 @@
 
 > A multi-agent dev workflow automation system powered by **Claude** (Anthropic) that orchestrates specialised AI agents to automate software engineering tasks — from planning to code generation, review, and self-correction.
 
+[![evals](https://github.com/Saajine/codeops-agent/actions/workflows/evals.yml/badge.svg)](https://github.com/Saajine/codeops-agent/actions/workflows/evals.yml)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Claude Sonnet 4.6](https://img.shields.io/badge/Claude-Sonnet_4.6-purple.svg)](https://www.anthropic.com/)
-[![Tests](https://img.shields.io/badge/tests-41%20passed-green.svg)]()
+[![Tests](https://img.shields.io/badge/tests-97%20passed-green.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
