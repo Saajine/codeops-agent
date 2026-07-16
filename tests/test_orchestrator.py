@@ -155,6 +155,34 @@ class TestOrchestrator:
         # Coder should be called exactly max_iterations times
         assert orc._agents["coder"]._call_llm.call_count == 2
 
+    def test_rogue_approval_does_not_terminate_loop_as_success(self, tmp_store):
+        """A reviewer returning verdict='approved' with score 2 and a critical
+        issue must NOT end the self-correction loop. The coder should run the
+        full max_iterations rather than stopping after the first 'approval'.
+        """
+        rogue_review = json.dumps({
+            "verdict": "approved",
+            "score": 2,
+            "summary": "Claims approval but ships critical bugs.",
+            "issues": [
+                {"severity": "critical", "category": "security",
+                 "description": "hardcoded secret", "location": "x", "fix": "remove"},
+            ],
+            "strengths": [],
+            "required_changes": [],
+            "suggested_changes": [],
+        })
+        orc = Orchestrator(max_iterations=2, store=tmp_store)
+        orc._agents["planner"]._call_llm = MagicMock(return_value=json.dumps(SIMPLE_PLAN))
+        orc._agents["coder"]._call_llm = MagicMock(return_value=MOCK_CODE)
+        orc._agents["reviewer"]._call_llm = MagicMock(return_value=rogue_review)
+
+        with patch("codeops.config.Config.validate"):
+            orc.run("Build an add function")
+
+        # Loop did not break on the bogus approval → coder ran every iteration.
+        assert orc._agents["coder"]._call_llm.call_count == 2
+
     def test_run_single_skill(self, tmp_store):
         """run_single_skill bypasses the planner."""
         orc = make_orchestrator(tmp_store)

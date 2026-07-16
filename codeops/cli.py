@@ -44,7 +44,7 @@ def run(
     task: str = typer.Argument(..., help="Task description — what you want built or fixed."),
     demo: bool = typer.Option(False, "--demo", "-d", help="Run in demo mode (no API key needed)."),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Override the Claude model."),
-    max_iterations: Optional[int] = typer.Option(None, "--max-iter", "-i", help="Max self-correction iterations."),
+    max_iterations: Optional[int] = typer.Option(None, "--max-iter", "-i", min=1, help="Max self-correction iterations (>= 1)."),
     output_dir: Optional[str] = typer.Option(None, "--output", "-o", help="Directory to write generated files."),
 ) -> None:
     """Run the full plan -> code -> review -> fix pipeline."""
@@ -203,12 +203,30 @@ def _print_header(task: str) -> None:
 
 
 def _write_output(output: str, output_dir: str) -> None:
-    """Write generated code files to the output directory."""
+    """Write generated code files to the output directory.
+
+    File paths inside ---FILE: ...--- blocks come straight from LLM output and
+    are untrusted. Every write is routed through FileSystemConnector._safe_path,
+    which rejects any path that resolves outside output_dir (traversal guard).
+    """
     import re
     from pathlib import Path
 
+    from codeops.mcp.connectors import FileSystemConnector
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    fs = FileSystemConnector(root_dir=str(out))
+
+    def _write(relative: str, content: str) -> None:
+        try:
+            fpath = fs._safe_path(relative)
+        except PermissionError as exc:
+            console.print(f"  [red]blocked[/red] {relative} — {exc}")
+            return
+        fpath.parent.mkdir(parents=True, exist_ok=True)
+        fpath.write_text(content)
+        console.print(f"  [green]wrote[/green] {fpath}")
 
     # Try to extract ---FILE: path--- blocks
     pattern = re.compile(r"---FILE:\s*(.+?)---\s*(.*?)---END---", re.DOTALL | re.IGNORECASE)
@@ -216,15 +234,10 @@ def _write_output(output: str, output_dir: str) -> None:
 
     if matches:
         for match in matches:
-            fpath = out / match.group(1).strip()
-            fpath.parent.mkdir(parents=True, exist_ok=True)
-            fpath.write_text(match.group(2).strip())
-            console.print(f"  [green]wrote[/green] {fpath}")
+            _write(match.group(1).strip(), match.group(2).strip())
     else:
         # Single file fallback
-        fpath = out / "generated_code.py"
-        fpath.write_text(output)
-        console.print(f"  [green]wrote[/green] {fpath}")
+        _write("generated_code.py", output)
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────

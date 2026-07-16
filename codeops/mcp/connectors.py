@@ -147,7 +147,9 @@ class FileSystemConnector(MCPConnector):
 
     def _safe_path(self, relative: str) -> Path:
         target = (self.root / relative).resolve()
-        if not str(target).startswith(str(self.root)):
+        # Use real path containment, not string prefix: a startswith() check
+        # would let root ".../out" match a sibling ".../outside" and leak.
+        if not target.is_relative_to(self.root):
             raise PermissionError(f"Path traversal attempt blocked: {relative}")
         return target
 

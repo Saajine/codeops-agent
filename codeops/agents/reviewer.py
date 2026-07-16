@@ -88,8 +88,26 @@ Rules:
             critical_count = sum(1 for i in issues if i.get("severity") == "critical")
             major_count = sum(1 for i in issues if i.get("severity") == "major")
 
-            # Determine action for orchestrator
-            if verdict == "approved":
+            # Coerce score defensively — a malformed model response may return a
+            # non-numeric score, which must not be treated as passing.
+            try:
+                score_val = int(score)
+            except (TypeError, ValueError):
+                score_val = 0
+
+            # The executor — not the model — enforces the approval bar stated in
+            # the system prompt: approved only when the verdict says so AND the
+            # score clears the threshold AND no critical/major issues remain.
+            # Without this, a model reply of {"verdict":"approved","score":2,...}
+            # would end the self-correction loop on unreviewed-quality code.
+            approved = (
+                verdict == "approved"
+                and score_val >= 7
+                and critical_count == 0
+                and major_count == 0
+            )
+
+            if approved:
                 status = "success"
                 next_action = "done"
             else:

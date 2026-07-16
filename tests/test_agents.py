@@ -270,6 +270,54 @@ class TestReviewerAgent:
 
         assert result.status == "error"
 
+    def test_approved_verdict_with_low_score_is_not_accepted(self, tmp_store, context):
+        """The executor, not the model, enforces the approval bar.
+
+        A reply claiming "approved" with a failing score and a critical issue
+        must NOT resolve to done/success.
+        """
+        context.set_agent_output("code_generation", MOCK_CODE, agent_name="coder")
+        rogue = json.dumps({
+            "verdict": "approved",
+            "score": 2,
+            "summary": "Claims approval but is not actually good.",
+            "issues": [
+                {"severity": "critical", "category": "security",
+                 "description": "hardcoded secret", "location": "x", "fix": "remove"},
+            ],
+            "strengths": [],
+            "required_changes": [],
+            "suggested_changes": [],
+        })
+        reviewer = ReviewerAgent(store=tmp_store)
+        with patch.object(reviewer, "_call_llm", return_value=rogue):
+            result = reviewer.execute("Review rate limiter", context)
+
+        assert result.status == "needs_revision"
+        assert result.next_action != "done"
+
+    def test_approved_with_major_issue_is_not_accepted(self, tmp_store, context):
+        """High score alone is not enough — an unresolved major issue blocks approval."""
+        context.set_agent_output("code_generation", MOCK_CODE, agent_name="coder")
+        rogue = json.dumps({
+            "verdict": "approved",
+            "score": 9,
+            "summary": "High score but a major bug remains.",
+            "issues": [
+                {"severity": "major", "category": "correctness",
+                 "description": "off-by-one", "location": "loop", "fix": "fix bound"},
+            ],
+            "strengths": [],
+            "required_changes": [],
+            "suggested_changes": [],
+        })
+        reviewer = ReviewerAgent(store=tmp_store)
+        with patch.object(reviewer, "_call_llm", return_value=rogue):
+            result = reviewer.execute("Review rate limiter", context)
+
+        assert result.status == "needs_revision"
+        assert result.next_action != "done"
+
 
 # ── TestGeneratorAgent tests ─────────────────────────────────────────────────
 
