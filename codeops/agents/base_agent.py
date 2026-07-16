@@ -11,6 +11,7 @@ Every agent:
 
 from __future__ import annotations
 
+import json
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -62,6 +63,9 @@ class BaseAgent(ABC):
     skills: list[str] = []
     system_prompt: str = "You are a helpful software engineering agent."
 
+    # Safety cap on the number of model round-trips in a tool-use loop.
+    MAX_TOOL_ITERATIONS: int = 8
+
     def __init__(
         self,
         store: MemoryStore | None = None,
@@ -100,19 +104,29 @@ class BaseAgent(ABC):
         messages: list[dict[str, Any]],
         system: str | None = None,
         use_streaming: bool = True,
-    ) -> str:
+        tools: list[dict[str, Any]] | None = None,
+    ) -> Any:
         """
-        Call the Anthropic API.  Uses streaming for long responses to avoid
-        HTTP timeouts, then reassembles into a single string.
+        Call the Anthropic API for a single turn.
 
-        In demo mode, returns realistic mock responses instead.
+        Without *tools*, returns the assembled response text as a string
+        (streaming by default, to avoid HTTP timeouts on long outputs).
+
+        With *tools*, returns the full ``Message`` object so the caller can
+        inspect ``response.stop_reason`` and any ``tool_use`` content blocks.
+        Tool turns run non-streaming — the tool loop needs the complete
+        message (including tool_use inputs) before it can act.
+
+        In demo mode, returns realistic mock text instead of hitting the API.
         """
-        # Demo mode — return realistic mocks without hitting the API
+        # Demo mode — return realistic mocks without hitting the API.
         if self._demo_mode:
             task_text = ""
             for msg in messages:
                 if msg.get("role") == "user":
-                    task_text = msg.get("content", "")[:500]
+                    content = msg.get("content", "")
+                    if isinstance(content, str):
+                        task_text = content[:500]
                     break
             return demo_llm_response(self.name, task_text, self._iteration)
 
@@ -125,11 +139,121 @@ class BaseAgent(ABC):
             thinking={"type": "adaptive"},
         )
 
+        if tools:
+            kwargs["tools"] = tools
+            # Non-streaming create; cap max_tokens so the SDK doesn't refuse
+            # the request for exceeding its no-stream timeout estimate.
+            kwargs["max_tokens"] = min(self.max_tokens, 8192)
+            return self._client.messages.create(**kwargs)
+
         if use_streaming:
             return self._call_llm_streaming(**kwargs)
         else:
             response = self._client.messages.create(**kwargs)
             return self._extract_text(response.content)
+
+    # ── Tool-use loop ─────────────────────────────────────────────────────────
+
+    def _run_tool_loop(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        dispatch: dict[str, Any],
+        system: str | None = None,
+        max_iterations: int | None = None,
+    ) -> tuple[str, list[dict[str, Any]]]:
+        """
+        Drive the Anthropic tool-use loop.
+
+        Each turn: send messages + tools → receive the model's response. If it
+        contains tool_use blocks, validate their arguments, dispatch each to
+        the matching callable in *dispatch*, feed the tool_result blocks back,
+        and repeat. Stop when the model stops calling tools (``end_turn``) or
+        the iteration cap is reached.
+
+        Returns ``(final_text, tool_calls)`` where *tool_calls* records every
+        tool the model invoked (name, input, and whether it succeeded).
+
+        NOTE: *messages* is mutated in place — the assistant turn and the
+        tool_result turn are appended each iteration.
+        """
+        cap = max_iterations or self.MAX_TOOL_ITERATIONS
+        tool_calls: list[dict[str, Any]] = []
+
+        for _ in range(cap):
+            response = self._call_llm(messages, system=system, tools=tools)
+
+            # Server paused a long turn — resend the history to resume it.
+            if response.stop_reason == "pause_turn":
+                messages.append({"role": "assistant", "content": response.content})
+                continue
+
+            tool_uses = [b for b in response.content if getattr(b, "type", None) == "tool_use"]
+
+            # Model is done calling tools — return its final text.
+            if response.stop_reason == "end_turn" or not tool_uses:
+                return self._extract_text(response.content), tool_calls
+
+            # Preserve the full assistant turn (incl. thinking + tool_use blocks).
+            messages.append({"role": "assistant", "content": response.content})
+
+            results: list[dict[str, Any]] = []
+            for tu in tool_uses:
+                ok, payload = self._invoke_tool(dispatch.get(tu.name), tu.name, tu.input)
+                tool_calls.append({"name": tu.name, "input": tu.input, "ok": ok})
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": tu.id,
+                        "content": payload,
+                        "is_error": not ok,
+                    }
+                )
+            messages.append({"role": "user", "content": results})
+
+        # Iteration cap hit — ask once more for a final answer, no tools.
+        messages.append(
+            {
+                "role": "user",
+                "content": "Tool budget reached. Provide your final answer now without calling more tools.",
+            }
+        )
+        final = self._call_llm(messages, system=system)
+        return (final if isinstance(final, str) else self._extract_text(final.content)), tool_calls
+
+    def _invoke_tool(
+        self, fn: Any, name: str, args: Any
+    ) -> tuple[bool, str]:
+        """
+        Validate a tool call's arguments and dispatch it to *fn*.
+
+        Returns ``(ok, content)``. On any failure, ``ok`` is False and
+        *content* is an error message fed back to the model as an error
+        tool_result so it can recover rather than the loop crashing.
+        """
+        if fn is None:
+            return False, f"Unknown tool: {name}"
+        if not isinstance(args, dict):
+            return False, f"Tool input for '{name}' must be a JSON object, got {type(args).__name__}."
+
+        try:
+            # The connector signature is the schema: missing/unexpected/wrong
+            # kwargs raise TypeError, which is exactly argument validation.
+            result = fn(**args)
+        except TypeError as exc:
+            return False, f"Invalid arguments for '{name}': {exc}"
+        except Exception as exc:  # noqa: BLE001 — surface any tool error to the model
+            return False, f"'{name}' failed: {exc}"
+
+        if isinstance(result, str):
+            text = result
+        else:
+            try:
+                text = json.dumps(result, default=str)
+            except Exception:
+                text = str(result)
+        # Bound the payload so large diffs/listings don't blow up the context.
+        return True, text[:20000]
 
     def _call_llm_streaming(self, **kwargs: Any) -> str:
         """Stream the response and reassemble, ignoring thinking blocks."""

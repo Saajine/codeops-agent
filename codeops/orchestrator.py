@@ -14,6 +14,7 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -83,6 +84,7 @@ class Orchestrator:
         self,
         max_iterations: int | None = None,
         store: MemoryStore | None = None,
+        use_mcp: bool | None = None,
     ) -> None:
         self.max_iterations = max_iterations or config.MAX_ITERATIONS
         self.store = store or MemoryStore()
@@ -90,6 +92,34 @@ class Orchestrator:
         # Initialise agents and register them with the skill registry
         self._agents: dict[str, BaseAgent] = {}
         self._init_agents()
+
+        # Optional: connect the MCP servers and federate their tools. Off by
+        # default (spawns subprocesses); enable via arg or CODEOPS_MCP=1.
+        self.mcp = None
+        if use_mcp is None:
+            use_mcp = os.getenv("CODEOPS_MCP", "").lower() in ("1", "true", "yes")
+        if use_mcp:
+            self._start_mcp()
+
+    def _start_mcp(self) -> None:
+        """Start the MCP client (tools/list discovery) and inject it into agents."""
+        from codeops.mcp.client import MCPClient, default_servers
+
+        self.mcp = MCPClient(default_servers()).start()
+        console.print(
+            f"[dim]MCP: discovered {len(self.mcp.registry)} tools across "
+            f"{list(self.mcp.registry.by_server())}[/dim]"
+        )
+        # Agents that can use federated tools get a handle to the client.
+        gh = self._agents.get("github_pr")
+        if gh is not None:
+            gh.mcp = self.mcp
+
+    def close(self) -> None:
+        """Shut down MCP servers if started."""
+        if self.mcp is not None:
+            self.mcp.stop()
+            self.mcp = None
 
     # ── Public API ────────────────────────────────────────────────────────────
 

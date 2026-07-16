@@ -18,7 +18,21 @@ import re
 from typing import Any
 
 from codeops.agents.base_agent import AgentResult, BaseAgent
+from codeops.agents.tool_planner import plan_tools
 from codeops.memory.context import ContextManager
+
+# A full PR URL: https://github.com/<owner>/<repo>/pull/<n>
+_PR_URL_RE = re.compile(r"github\.com/([\w.-]+)/([\w.-]+)/pull/(\d+)")
+# Shorthand: <owner>/<repo>#<n>
+_PR_SHORT_RE = re.compile(r"\b([\w.-]+)/([\w.-]+)#(\d+)\b")
+
+
+def _extract_pr_ref(task: str) -> tuple[str, str, int] | None:
+    """Return (owner, repo, pr_number) if the task references a GitHub PR."""
+    match = _PR_URL_RE.search(task) or _PR_SHORT_RE.search(task)
+    if match:
+        return match.group(1), match.group(2), int(match.group(3))
+    return None
 
 
 class GitHubPRAgent(BaseAgent):
@@ -32,6 +46,11 @@ class GitHubPRAgent(BaseAgent):
 
     name = "github_pr"
     skills = ["pr_automation", "pr_description", "pr_review"]
+
+    # Optional MCPClient, injected by the orchestrator when CODEOPS_MCP is on.
+    # When present, PR reviews call GitHub tools over the MCP boundary; when
+    # None, they use the in-process connector directly.
+    mcp: Any = None
     system_prompt = """\
 You are a senior software engineer specializing in code review and pull request best practices.
 Your role is to automate the PR workflow to reduce bottlenecks on human reviewers.
@@ -79,6 +98,29 @@ Rules:
     def execute(self, task: str, context: ContextManager) -> AgentResult:
         self.logger.info("Running PR automation for task: %s", task[:80])
 
+        # Pre-flight safety gate — refuse destructive/exfiltration requests and
+        # escalate privilege-bypass requests before any tool or model runs.
+        plan = plan_tools(task)
+        if plan.action in ("refuse", "escalate"):
+            self.logger.warning("Guardrail %s: %s", plan.action, plan.reason)
+            return AgentResult(
+                agent_name=self.name,
+                skill="pr_automation",
+                output=f"{plan.action.capitalize()}d — {plan.reason}.",
+                status="error" if plan.action == "refuse" else "needs_revision",
+                next_action="abort" if plan.action == "refuse" else "escalate",
+                metadata={"guardrail": plan.action, "reason": plan.reason},
+            )
+
+        # Real-PR path: if the task names a GitHub PR and we can reach the API,
+        # let the model read the PR itself via GitHub tool calls.
+        pr_ref = _extract_pr_ref(task)
+        if pr_ref and not self._demo_mode and self._client is not None:
+            try:
+                return self._review_pr_with_tools(task, pr_ref, context)
+            except Exception as exc:  # noqa: BLE001 — fall back to the text path
+                self.logger.error("Tool-based PR review failed: %s", exc, exc_info=True)
+
         # Pull code from context if a coder has already run, otherwise use task directly
         code = context.get_agent_output("code_generation") or task
 
@@ -125,6 +167,74 @@ Rules:
                 status="error",
                 next_action="abort",
             )
+
+    def _review_pr_with_tools(
+        self, task: str, pr_ref: tuple[str, str, int], context: ContextManager
+    ) -> AgentResult:
+        """Review a real PR by letting the model call the GitHub read tools."""
+        from codeops.mcp.connectors import GitHubConnector
+        from codeops.mcp.tools import GITHUB_TOOLS, build_github_dispatch
+
+        owner, repo, number = pr_ref
+
+        # Source the tools + dispatch from MCP (federated, over the protocol
+        # boundary) if a client is wired in; otherwise call the connector
+        # directly in-process.
+        if self.mcp is not None:
+            tools = self.mcp.registry.anthropic_tools()
+            dispatch = self.mcp.dispatch()
+            transport = "mcp"
+        else:
+            tools = GITHUB_TOOLS
+            dispatch = build_github_dispatch(GitHubConnector())
+            transport = "in_process"
+
+        prompt = (
+            f"Review pull request #{number} in the repository {owner}/{repo}.\n\n"
+            f"First call get_pull_request to read its metadata and diff, and "
+            f"get_pr_files to see the changed files. Use get_file_content or "
+            f"get_pr_comments if you need more context. Then produce the PR "
+            f"automation JSON exactly as specified in your instructions.\n\n"
+            f"Original request:\n{task}"
+        )
+        messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
+
+        final_text, tool_calls = self._run_tool_loop(
+            messages, tools, dispatch, system=self.system_prompt
+        )
+        tools_used = sorted({c["name"] for c in tool_calls})
+
+        # The model was asked for the PR-automation JSON; render it if parseable,
+        # otherwise fall back to whatever text it produced.
+        try:
+            pr_data = self._parse_json(final_text)
+            output = self._format_pr_output(pr_data)
+            meta_extra = {
+                "risk_level": pr_data.get("risk_assessment", {}).get("level", "unknown"),
+                "merge_ready": pr_data.get("merge_readiness", {}).get("ready", False),
+                "review_comments": len(pr_data.get("automated_review_comments", [])),
+                "raw": pr_data,
+            }
+        except Exception:
+            output = final_text
+            meta_extra = {}
+
+        result = AgentResult(
+            agent_name=self.name,
+            skill="pr_automation",
+            output=output,
+            status="success",
+            next_action="done",
+            metadata={
+                "pr": f"{owner}/{repo}#{number}",
+                "transport": transport,
+                "tools_used": tools_used,
+                "tool_calls": tool_calls,
+                **meta_extra,
+            },
+        )
+        self._persist_result(result, context)
+        return result
 
     def _parse_json(self, raw: str) -> dict[str, Any]:
         cleaned = re.sub(r"```(?:json)?\s*", "", raw).strip().rstrip("`").strip()

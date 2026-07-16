@@ -9,6 +9,7 @@ setup(
     python_requires=">=3.11",
     install_requires=[
         "anthropic>=0.40.0",
+        "mcp>=1.0.0",
         "fastapi>=0.115.0",
         "uvicorn>=0.32.0",
         "pydantic>=2.9.0",
